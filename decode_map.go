@@ -118,11 +118,31 @@ func (d *Decoder) decodeMapStringStringPtr(ptr *map[string]string) error {
 		m = *ptr
 	}
 
+	var seen map[string]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[string]struct{}, size)
+	}
+
 	for i := 0; i < size; i++ {
 		mk, err := d.DecodeString()
 		if err != nil {
 			return err
 		}
+
+		if seen != nil {
+			if _, dup := seen[mk]; dup {
+				if d.dupKeyPolicy == DuplicateKeyReject {
+					return fmt.Errorf("msgpack: duplicate map key %q", mk)
+				}
+				// DuplicateKeyFirst: keep the first value and skip this one.
+				if err := d.Skip(); err != nil {
+					return err
+				}
+				continue
+			}
+			seen[mk] = struct{}{}
+		}
+
 		mv, err := d.DecodeString()
 		if err != nil {
 			return err
@@ -159,11 +179,31 @@ func (d *Decoder) DecodeMap() (map[string]interface{}, error) {
 
 	m := make(map[string]interface{}, n)
 
+	var seen map[string]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[string]struct{}, n)
+	}
+
 	for i := 0; i < n; i++ {
 		mk, err := d.DecodeString()
 		if err != nil {
 			return nil, err
 		}
+
+		if seen != nil {
+			if _, dup := seen[mk]; dup {
+				if d.dupKeyPolicy == DuplicateKeyReject {
+					return nil, fmt.Errorf("msgpack: duplicate map key %q", mk)
+				}
+				// DuplicateKeyFirst: keep the first value and skip this one.
+				if err := d.Skip(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			seen[mk] = struct{}{}
+		}
+
 		mv, err := d.decodeInterfaceCond()
 		if err != nil {
 			return nil, err
@@ -186,10 +226,29 @@ func (d *Decoder) DecodeUntypedMap() (map[interface{}]interface{}, error) {
 
 	m := make(map[interface{}]interface{}, n)
 
+	var seen map[interface{}]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{}, n)
+	}
+
 	for i := 0; i < n; i++ {
 		mk, err := d.decodeInterfaceCond()
 		if err != nil {
 			return nil, err
+		}
+
+		if seen != nil && dupKeyComparable(mk) {
+			if _, dup := seen[mk]; dup {
+				if d.dupKeyPolicy == DuplicateKeyReject {
+					return nil, dupKeyError(mk)
+				}
+				// DuplicateKeyFirst: keep the first value and skip this one.
+				if err := d.Skip(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			seen[mk] = struct{}{}
 		}
 
 		mv, err := d.decodeInterfaceCond()
@@ -201,6 +260,23 @@ func (d *Decoder) DecodeUntypedMap() (map[interface{}]interface{}, error) {
 	}
 
 	return m, nil
+}
+
+// dupKeyComparable reports whether k can be used as a key in the duplicate
+// tracking map. Decoded interface{} keys may be non-comparable (e.g. slices
+// or maps); such keys are not tracked.
+func dupKeyComparable(k interface{}) bool {
+	if k == nil {
+		return true
+	}
+	return reflect.TypeOf(k).Comparable()
+}
+
+func dupKeyError(k interface{}) error {
+	if s, ok := k.(string); ok {
+		return fmt.Errorf("msgpack: duplicate map key %q", s)
+	}
+	return fmt.Errorf("msgpack: duplicate map key %v", k)
 }
 
 // DecodeTypedMap decodes a typed map. Typed map is a map that has a fixed type for keys and values.
@@ -242,7 +318,14 @@ func (d *Decoder) DecodeTypedMap() (interface{}, error) {
 	mapValue.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(value))
 
 	n--
-	if err := d.decodeTypedMapValue(mapValue, n); err != nil {
+	var seen map[interface{}]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{}, n+1)
+		if dupKeyComparable(key) {
+			seen[key] = struct{}{}
+		}
+	}
+	if err := d.decodeTypedMapValueTracked(mapValue, n, seen); err != nil {
 		return nil, err
 	}
 
@@ -250,6 +333,14 @@ func (d *Decoder) DecodeTypedMap() (interface{}, error) {
 }
 
 func (d *Decoder) decodeTypedMapValue(v reflect.Value, n int) error {
+	var seen map[interface{}]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{}, n)
+	}
+	return d.decodeTypedMapValueTracked(v, n, seen)
+}
+
+func (d *Decoder) decodeTypedMapValueTracked(v reflect.Value, n int, seen map[interface{}]struct{}) error {
 	var (
 		typ       = v.Type()
 		keyType   = typ.Key()
@@ -259,6 +350,23 @@ func (d *Decoder) decodeTypedMapValue(v reflect.Value, n int) error {
 		mk := d.newValue(keyType).Elem()
 		if err := d.DecodeValue(mk); err != nil {
 			return err
+		}
+
+		if seen != nil {
+			k := mk.Interface()
+			if dupKeyComparable(k) {
+				if _, dup := seen[k]; dup {
+					if d.dupKeyPolicy == DuplicateKeyReject {
+						return dupKeyError(k)
+					}
+					// DuplicateKeyFirst: keep the first value and skip this one.
+					if err := d.Skip(); err != nil {
+						return err
+					}
+					continue
+				}
+				seen[k] = struct{}{}
+			}
 		}
 
 		mv := d.newValue(valueType).Elem()
@@ -330,6 +438,14 @@ func (d *Decoder) decodeStruct(v reflect.Value, n int) error {
 		return nil
 	}
 
+	// Duplicate struct fields are tracked by the *field identity, so
+	// different names (including aliases) that resolve to the same struct
+	// field are considered duplicates.
+	var seen map[*field]struct{}
+	if d.dupKeyPolicy != DuplicateKeyLast {
+		seen = make(map[*field]struct{}, n)
+	}
+
 	fields := structs.Fields(v.Type(), d.structTag)
 	for i := 0; i < n; i++ {
 		name, err := d.decodeStringTemp()
@@ -338,6 +454,19 @@ func (d *Decoder) decodeStruct(v reflect.Value, n int) error {
 		}
 
 		if f := fields.Map[name]; f != nil {
+			if seen != nil {
+				if _, dup := seen[f]; dup {
+					if d.dupKeyPolicy == DuplicateKeyReject {
+						return fmt.Errorf("msgpack: duplicate field %q", name)
+					}
+					// DuplicateKeyFirst: keep the first value and skip this one.
+					if err := d.Skip(); err != nil {
+						return err
+					}
+					continue
+				}
+				seen[f] = struct{}{}
+			}
 			if err := f.DecodeValue(d, v); err != nil {
 				return err
 			}

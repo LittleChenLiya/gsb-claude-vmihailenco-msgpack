@@ -31,6 +31,22 @@ type bufReader interface {
 	io.ByteScanner
 }
 
+// DuplicateKeyPolicy controls how the Decoder handles duplicate keys when
+// decoding maps and structs.
+type DuplicateKeyPolicy int
+
+const (
+	// DuplicateKeyLast is the default policy and keeps the historical
+	// behavior: when a key appears multiple times the last value wins.
+	DuplicateKeyLast DuplicateKeyPolicy = iota
+	// DuplicateKeyReject makes decoding fail with an error when a key
+	// appears more than once in the same map or struct scope.
+	DuplicateKeyReject
+	// DuplicateKeyFirst keeps the first decoded value and skips the values
+	// of subsequent occurrences of the same key.
+	DuplicateKeyFirst
+)
+
 //------------------------------------------------------------------------------
 
 var decPool = sync.Pool{
@@ -66,14 +82,15 @@ func Unmarshal(data []byte, v interface{}) error {
 
 // A Decoder reads and decodes MessagePack values from an input stream.
 type Decoder struct {
-	r          io.Reader
-	s          io.ByteScanner
-	mapDecoder func(*Decoder) (interface{}, error)
-	structTag  string
-	buf        []byte
-	rec        []byte
-	dict       []string
-	flags      uint32
+	r            io.Reader
+	s            io.ByteScanner
+	mapDecoder   func(*Decoder) (interface{}, error)
+	structTag    string
+	buf          []byte
+	rec          []byte
+	dict         []string
+	flags        uint32
+	dupKeyPolicy DuplicateKeyPolicy
 }
 
 // NewDecoder returns a new decoder that reads from r.
@@ -99,6 +116,7 @@ func (d *Decoder) ResetDict(r io.Reader, dict []string) {
 	d.flags = 0
 	d.structTag = ""
 	d.dict = dict
+	d.dupKeyPolicy = DuplicateKeyLast
 }
 
 func (d *Decoder) WithDict(dict []string, fn func(*Decoder) error) error {
@@ -155,6 +173,25 @@ func (d *Decoder) DisallowUnknownFields(on bool) {
 	} else {
 		d.flags &= ^disallowUnknownFieldsFlag
 	}
+}
+
+// SetDuplicateKeyPolicy sets the policy used to handle duplicate keys when
+// decoding maps and structs.
+//
+// Duplicates are detected using the decoded key identity: for structs,
+// different names (including aliases) that resolve to the same struct field
+// are considered duplicates. Nested maps and structs are tracked
+// independently, i.e. the same key may appear once per nesting level.
+//
+// With DuplicateKeyFirst the values of duplicate keys are skipped (fully
+// consuming nested containers) so decoding of the following keys is not
+// affected. With DuplicateKeyReject decoding fails with an error instead of
+// returning a partially decoded value.
+//
+// The default policy is DuplicateKeyLast which preserves the historical
+// behavior and performs no duplicate detection.
+func (d *Decoder) SetDuplicateKeyPolicy(policy DuplicateKeyPolicy) {
+	d.dupKeyPolicy = policy
 }
 
 // UseInternedStrings enables support for decoding interned strings.
