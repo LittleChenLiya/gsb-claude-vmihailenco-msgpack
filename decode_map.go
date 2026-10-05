@@ -34,6 +34,21 @@ func decodeMapValue(d *Decoder, v reflect.Value) error {
 		return nil
 	}
 
+	if d.dupKeys == DuplicateKeyReject {
+		// Build into a fresh map so a duplicate key does not leave the
+		// destination half-populated.
+		ln := n
+		if d.flags&disableAllocLimitFlag == 0 {
+			ln = min(ln, maxMapSize)
+		}
+		m := reflect.MakeMapWithSize(typ, ln)
+		if err := d.decodeTypedMapValue(m, n); err != nil {
+			return err
+		}
+		v.Set(m)
+		return nil
+	}
+
 	if v.IsNil() {
 		ln := n
 		if d.flags&disableAllocLimitFlag == 0 {
@@ -109,7 +124,15 @@ func (d *Decoder) decodeMapStringStringPtr(ptr *map[string]string) error {
 	}
 
 	m := *ptr
-	if m == nil {
+	if d.dupKeys == DuplicateKeyReject {
+		// Build into a fresh map so a duplicate key does not leave the
+		// destination half-populated.
+		ln := size
+		if d.flags&disableAllocLimitFlag == 0 {
+			ln = min(size, maxMapSize)
+		}
+		m = make(map[string]string, ln)
+	} else if m == nil {
 		ln := size
 		if d.flags&disableAllocLimitFlag == 0 {
 			ln = min(size, maxMapSize)
@@ -118,16 +141,39 @@ func (d *Decoder) decodeMapStringStringPtr(ptr *map[string]string) error {
 		m = *ptr
 	}
 
+	var seen map[interface{}]struct{}
+	if d.dupKeys != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{})
+	}
+
 	for i := 0; i < size; i++ {
 		mk, err := d.DecodeString()
 		if err != nil {
 			return err
 		}
+
+		if seen != nil {
+			dup, err := d.dupKeySeen(seen, mk, mk)
+			if err != nil {
+				return err
+			}
+			if dup {
+				if err := d.Skip(); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+
 		mv, err := d.DecodeString()
 		if err != nil {
 			return err
 		}
 		m[mk] = mv
+	}
+
+	if d.dupKeys == DuplicateKeyReject {
+		*ptr = m
 	}
 
 	return nil
@@ -159,11 +205,30 @@ func (d *Decoder) DecodeMap() (map[string]interface{}, error) {
 
 	m := make(map[string]interface{}, n)
 
+	var seen map[interface{}]struct{}
+	if d.dupKeys != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{})
+	}
+
 	for i := 0; i < n; i++ {
 		mk, err := d.DecodeString()
 		if err != nil {
 			return nil, err
 		}
+
+		if seen != nil {
+			dup, err := d.dupKeySeen(seen, mk, mk)
+			if err != nil {
+				return nil, err
+			}
+			if dup {
+				if err := d.Skip(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
+
 		mv, err := d.decodeInterfaceCond()
 		if err != nil {
 			return nil, err
@@ -186,10 +251,28 @@ func (d *Decoder) DecodeUntypedMap() (map[interface{}]interface{}, error) {
 
 	m := make(map[interface{}]interface{}, n)
 
+	var seen map[interface{}]struct{}
+	if d.dupKeys != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{})
+	}
+
 	for i := 0; i < n; i++ {
 		mk, err := d.decodeInterfaceCond()
 		if err != nil {
 			return nil, err
+		}
+
+		if seen != nil {
+			dup, err := d.dupKeySeen(seen, mk, mk)
+			if err != nil {
+				return nil, err
+			}
+			if dup {
+				if err := d.Skip(); err != nil {
+					return nil, err
+				}
+				continue
+			}
 		}
 
 		mv, err := d.decodeInterfaceCond()
@@ -255,10 +338,30 @@ func (d *Decoder) decodeTypedMapValue(v reflect.Value, n int) error {
 		keyType   = typ.Key()
 		valueType = typ.Elem()
 	)
+
+	var seen map[interface{}]struct{}
+	if d.dupKeys != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{})
+	}
+
 	for i := 0; i < n; i++ {
 		mk := d.newValue(keyType).Elem()
 		if err := d.DecodeValue(mk); err != nil {
 			return err
+		}
+
+		if seen != nil {
+			key := mk.Interface()
+			dup, err := d.dupKeySeen(seen, key, key)
+			if err != nil {
+				return err
+			}
+			if dup {
+				if err := d.Skip(); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
 		mv := d.newValue(valueType).Elem()
@@ -331,6 +434,28 @@ func (d *Decoder) decodeStruct(v reflect.Value, n int) error {
 	}
 
 	fields := structs.Fields(v.Type(), d.structTag)
+
+	if d.dupKeys == DuplicateKeyReject {
+		// Decode into a copy so a duplicate key does not leave the struct
+		// half-populated.
+		tmp := reflect.New(v.Type()).Elem()
+		tmp.Set(v)
+		if err := d.decodeStructInto(tmp, n, fields); err != nil {
+			return err
+		}
+		v.Set(tmp)
+		return nil
+	}
+
+	return d.decodeStructInto(v, n, fields)
+}
+
+func (d *Decoder) decodeStructInto(v reflect.Value, n int, fields *fields) error {
+	var seen map[interface{}]struct{}
+	if d.dupKeys != DuplicateKeyLast {
+		seen = make(map[interface{}]struct{})
+	}
+
 	for i := 0; i < n; i++ {
 		name, err := d.decodeStringTemp()
 		if err != nil {
@@ -338,6 +463,21 @@ func (d *Decoder) decodeStruct(v reflect.Value, n int) error {
 		}
 
 		if f := fields.Map[name]; f != nil {
+			if seen != nil {
+				// Track by the field pointer so that an alias hitting the
+				// same field counts as a duplicate.
+				key := interface{}(f)
+				dup, err := d.dupKeySeen(seen, key, name)
+				if err != nil {
+					return err
+				}
+				if dup {
+					if err := d.Skip(); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if err := f.DecodeValue(d, v); err != nil {
 				return err
 			}

@@ -26,6 +26,23 @@ const (
 	disableAllocLimitFlag
 )
 
+// DuplicateKeyStrategy determines how a Decoder handles duplicate map keys
+// while decoding a map or a struct.
+type DuplicateKeyStrategy int
+
+const (
+	// DuplicateKeyLast is the default strategy. When a duplicate key is
+	// encountered, the last value wins and overwrites the previous one.
+	DuplicateKeyLast DuplicateKeyStrategy = iota
+	// DuplicateKeyFirst causes the first value to win. Subsequent values
+	// for the same key are skipped without being decoded, so custom decoders
+	// are not invoked for them.
+	DuplicateKeyFirst
+	// DuplicateKeyReject causes the Decoder to return an error when a
+	// duplicate key is encountered. The destination is left untouched.
+	DuplicateKeyReject
+)
+
 type bufReader interface {
 	io.Reader
 	io.ByteScanner
@@ -74,6 +91,7 @@ type Decoder struct {
 	rec        []byte
 	dict       []string
 	flags      uint32
+	dupKeys    DuplicateKeyStrategy
 }
 
 // NewDecoder returns a new decoder that reads from r.
@@ -98,6 +116,7 @@ func (d *Decoder) ResetDict(r io.Reader, dict []string) {
 	d.ResetReader(r)
 	d.flags = 0
 	d.structTag = ""
+	d.dupKeys = DuplicateKeyLast
 	d.dict = dict
 }
 
@@ -155,6 +174,17 @@ func (d *Decoder) DisallowUnknownFields(on bool) {
 	} else {
 		d.flags &= ^disallowUnknownFieldsFlag
 	}
+}
+
+// SetDuplicateKeyStrategy sets the strategy for handling duplicate keys in
+// maps and structs. The default is DuplicateKeyLast, which preserves the
+// original behavior of letting the last value overwrite previous ones.
+//
+// The strategy is scoped per map or struct: nested maps and structs each
+// track their own keys, so a key repeated in a nested map is not treated as
+// a duplicate of a key in the outer map.
+func (d *Decoder) SetDuplicateKeyStrategy(s DuplicateKeyStrategy) {
+	d.dupKeys = s
 }
 
 // UseInternedStrings enables support for decoding interned strings.
@@ -325,6 +355,29 @@ func (d *Decoder) decodeInterfaceCond() (interface{}, error) {
 		return d.DecodeInterfaceLoose()
 	}
 	return d.DecodeInterface()
+}
+
+// dupKeySeen records key in seen and reports whether it was already present in
+// the current map or struct scope. key is the decoded value, so two different
+// msgpack encodings of the same value are treated as the same key. label is
+// only used in the error message returned in DuplicateKeyReject mode.
+//
+// When DuplicateKeyFirst is set, a duplicate is reported (true, nil) and the
+// caller must skip the value without decoding it. When DuplicateKeyReject is
+// set, a duplicate returns an error. DuplicateKeyLast (the default) performs
+// no tracking and preserves the original last-value-wins behavior.
+func (d *Decoder) dupKeySeen(seen map[interface{}]struct{}, key, label interface{}) (bool, error) {
+	if d.dupKeys == DuplicateKeyLast {
+		return false, nil
+	}
+	if _, ok := seen[key]; ok {
+		if d.dupKeys == DuplicateKeyReject {
+			return true, fmt.Errorf("msgpack: duplicate key %v", label)
+		}
+		return true, nil
+	}
+	seen[key] = struct{}{}
+	return false, nil
 }
 
 func (d *Decoder) DecodeValue(v reflect.Value) error {
