@@ -79,7 +79,6 @@ type Encoder struct {
 	dict      map[string]int
 	structTag string
 	buf       []byte
-	timeBuf   []byte
 	flags     uint32
 }
 

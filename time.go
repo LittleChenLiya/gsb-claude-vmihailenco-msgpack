@@ -1,7 +1,6 @@
 package msgpack
 
 import (
-	"encoding/binary"
 	"fmt"
 	"reflect"
 	"time"
@@ -17,18 +16,14 @@ func init() {
 }
 
 func timeEncoder(e *Encoder, v reflect.Value) ([]byte, error) {
-	return e.encodeTime(v.Interface().(time.Time)), nil
+	tm := v.Interface().(time.Time)
+	return e.encodeTime(tm)
 }
 
 func timeDecoder(d *Decoder, v reflect.Value, extLen int) error {
 	tm, err := d.decodeTime(extLen)
 	if err != nil {
 		return err
-	}
-
-	if tm.IsZero() {
-		// Zero time does not have timezone information.
-		tm = tm.UTC()
 	}
 
 	ptr := v.Addr().Interface().(*time.Time)
@@ -38,7 +33,10 @@ func timeDecoder(d *Decoder, v reflect.Value, extLen int) error {
 }
 
 func (e *Encoder) EncodeTime(tm time.Time) error {
-	b := e.encodeTime(tm)
+	b, err := e.encodeTime(tm)
+	if err != nil {
+		return err
+	}
 	if err := e.encodeExtLen(len(b)); err != nil {
 		return err
 	}
@@ -48,30 +46,11 @@ func (e *Encoder) EncodeTime(tm time.Time) error {
 	return e.write(b)
 }
 
-func (e *Encoder) encodeTime(tm time.Time) []byte {
-	if e.timeBuf == nil {
-		e.timeBuf = make([]byte, 12)
-	}
-
-	secs := uint64(tm.Unix())
-	if secs>>34 == 0 {
-		data := uint64(tm.Nanosecond())<<34 | secs
-
-		if data&0xffffffff00000000 == 0 {
-			b := e.timeBuf[:4]
-			binary.BigEndian.PutUint32(b, uint32(data))
-			return b
-		}
-
-		b := e.timeBuf[:8]
-		binary.BigEndian.PutUint64(b, data)
-		return b
-	}
-
-	b := e.timeBuf[:12]
-	binary.BigEndian.PutUint32(b, uint32(tm.Nanosecond()))
-	binary.BigEndian.PutUint64(b[4:], secs)
-	return b
+// encodeTime serializes tm through the strict timestamp32/64/96 codec. It keeps
+// seconds signed, so times before the epoch use the 96-bit layout instead of
+// being reduced modulo 2^64.
+func (e *Encoder) encodeTime(tm time.Time) ([]byte, error) {
+	return marshalTimestamp(tm.Unix(), int64(tm.Nanosecond()))
 }
 
 func (d *Decoder) DecodeTime() (time.Time, error) {
@@ -118,34 +97,15 @@ func (d *Decoder) DecodeTime() (time.Time, error) {
 		return tm, err
 	}
 
-	if tm.IsZero() {
-		// Zero time does not have timezone information.
-		return tm.UTC(), nil
-	}
 	return tm, nil
 }
 
+// decodeTime reads extLen bytes and validates them with the strict
+// timestamp32/64/96 codec. The returned time is always UTC.
 func (d *Decoder) decodeTime(extLen int) (time.Time, error) {
 	b, err := d.readN(extLen)
 	if err != nil {
 		return time.Time{}, err
 	}
-
-	switch len(b) {
-	case 4:
-		sec := binary.BigEndian.Uint32(b)
-		return time.Unix(int64(sec), 0), nil
-	case 8:
-		sec := binary.BigEndian.Uint64(b)
-		nsec := int64(sec >> 34)
-		sec &= 0x00000003ffffffff
-		return time.Unix(int64(sec), nsec), nil
-	case 12:
-		nsec := binary.BigEndian.Uint32(b)
-		sec := binary.BigEndian.Uint64(b[4:])
-		return time.Unix(int64(sec), int64(nsec)), nil
-	default:
-		err = fmt.Errorf("msgpack: invalid ext len=%d decoding time", extLen)
-		return time.Time{}, err
-	}
+	return unmarshalTimestamp(b)
 }
