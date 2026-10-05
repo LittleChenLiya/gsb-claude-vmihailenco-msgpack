@@ -84,6 +84,38 @@ func ExampleMarshal() {
 }
 ```
 
+## Timestamp extension
+
+`time.Time` is encoded as the msgpack
+[timestamp extension](https://github.com/msgpack/msgpack/blob/master/spec.md#timestamp-extension-type)
+(type id `-1`). The codec is strict: it rejects illegal nanoseconds
+(`>= 1_000_000_000`), wrong extension lengths and overflow before decoding,
+and decodes to UTC so the instant does not depend on the host timezone.
+
+The shortest legal layout is chosen from the seconds and nanoseconds:
+
+- **timestamp 32** (fixext 4, 4 body bytes): seconds since 1970-01-01 UTC as an
+  unsigned 32-bit big-endian integer; nanoseconds must be zero. Used when
+  `0 <= sec < 2^32` and `nsec == 0`.
+  Body: `[sec32 BE]`
+- **timestamp 64** (fixext 8, 8 body bytes): the top 30 bits hold the unsigned
+  nanoseconds (`0..999_999_999`) and the low 34 bits hold the unsigned seconds,
+  both big-endian. Used when `0 <= sec < 2^34`.
+  Body: `[nsec30 | sec34 BE]`
+- **timestamp 96** (ext 8/16/32, 12 body bytes): an unsigned 32-bit big-endian
+  nanoseconds field followed by a **signed** 64-bit big-endian seconds field
+  (two's complement), so seconds before the Unix epoch are preserved. Used for
+  negative seconds and for `sec >= 2^34`.
+  Body: `[nsec32 BE][sec64 signed BE]`
+
+The acceptance tests pin these layouts byte-for-byte, including the boundaries
+`sec = 2^32`, `sec = 2^34`, negative seconds and `nsec = 999_999_999` /
+`nsec = 1_000_000_000`. Run them with:
+
+```shell
+go test github.com/vmihailenco/msgpack/v5 -run 'TestTimestamp' -v
+```
+
 ## See also
 
 - [Golang ORM](https://github.com/uptrace/bun) for PostgreSQL, MySQL, MSSQL, and SQLite

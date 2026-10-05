@@ -553,19 +553,22 @@ var (
 			out: new(EmbeddingTest),
 		},
 
-		{in: time.Unix(0, 0), out: new(time.Time)},
+		// Timestamp extensions decode to UTC independently of the local
+		// timezone, so the expected values are normalized to UTC.
+		{in: time.Unix(0, 0), out: new(time.Time), wanted: time.Unix(0, 0).UTC()},
 		{in: new(time.Time), out: new(time.Time)},
-		{in: time.Unix(0, 1), out: new(time.Time)},
-		{in: time.Unix(1, 0), out: new(time.Time)},
-		{in: time.Unix(1, 1), out: new(time.Time)},
+		{in: time.Unix(0, 1), out: new(time.Time), wanted: time.Unix(0, 1).UTC()},
+		{in: time.Unix(1, 0), out: new(time.Time), wanted: time.Unix(1, 0).UTC()},
+		{in: time.Unix(1, 1), out: new(time.Time), wanted: time.Unix(1, 1).UTC()},
 		{
 			in:     time.Unix(0, 0).Format(time.RFC3339),
 			out:    new(time.Time),
-			wanted: mustParseTime(time.RFC3339, time.Unix(0, 0).Format(time.RFC3339)),
+			wanted: mustParseTime(time.RFC3339, time.Unix(0, 0).Format(time.RFC3339)).UTC(),
 		},
 		{in: EmbeddedTime{Time: time.Unix(1, 1)}, out: new(EmbeddedTime)},
 		{in: EmbeddedTime{Time: time.Unix(1, 1)}, out: new(*EmbeddedTime)},
-		{in: CustomTime(time.Unix(0, 0)), out: new(CustomTime)},
+		{in: CustomTime(time.Unix(0, 0)), out: new(CustomTime),
+			wanted: CustomTime(time.Unix(0, 0).UTC())},
 
 		{in: nil, out: new(*CustomEncoder), wantnil: true},
 		{in: nil, out: &CustomEncoder{str: "a"}, wantzero: true},
