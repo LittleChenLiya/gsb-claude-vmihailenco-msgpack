@@ -24,6 +24,7 @@ const (
 	disallowUnknownFieldsFlag
 	usePreallocateValues
 	disableAllocLimitFlag
+	strictStringBinFlag
 )
 
 type bufReader interface {
@@ -73,6 +74,7 @@ type Decoder struct {
 	buf        []byte
 	rec        []byte
 	dict       []string
+	path       []string
 	flags      uint32
 }
 
@@ -99,6 +101,7 @@ func (d *Decoder) ResetDict(r io.Reader, dict []string) {
 	d.flags = 0
 	d.structTag = ""
 	d.dict = dict
+	d.path = d.path[:0]
 }
 
 func (d *Decoder) WithDict(dict []string, fn func(*Decoder) error) error {
@@ -181,6 +184,26 @@ func (d *Decoder) DisableAllocLimit(on bool) {
 		d.flags |= disableAllocLimitFlag
 	} else {
 		d.flags &= ^disableAllocLimitFlag
+	}
+}
+
+// UseStrictStringBinTypes enables strict target type mode for string and
+// binary values. When enabled, the decoder rejects the two implicit
+// cross-conversions between the msgpack str and bin families:
+//   - a bin marker (bin 8/16/32) can no longer be decoded into a Go string,
+//   - a str marker (fixstr/str 8/16/32) can no longer be decoded into a Go
+//     []byte or [N]byte.
+//
+// Only these two conversions are restricted. Decoding into interface{}
+// targets keeps the original types (str -> string, bin -> []byte), and
+// struct field errors are wrapped with the nested field path. The default
+// (disabled) mode is unchanged and stays fully compatible with historical
+// data.
+func (d *Decoder) UseStrictStringBinTypes(on bool) {
+	if on {
+		d.flags |= strictStringBinFlag
+	} else {
+		d.flags &= ^strictStringBinFlag
 	}
 }
 
@@ -505,8 +528,13 @@ func (d *Decoder) DecodeInterfaceLoose() (interface{}, error) {
 		return d.uint(c)
 	case msgpcode.Int8, msgpcode.Int16, msgpcode.Int32, msgpcode.Int64:
 		return d.int(c)
-	case msgpcode.Str8, msgpcode.Str16, msgpcode.Str32,
-		msgpcode.Bin8, msgpcode.Bin16, msgpcode.Bin32:
+	case msgpcode.Str8, msgpcode.Str16, msgpcode.Str32:
+		return d.string(c)
+	case msgpcode.Bin8, msgpcode.Bin16, msgpcode.Bin32:
+		if d.flags&strictStringBinFlag != 0 {
+			// Strict mode: interface targets keep the original type.
+			return d.bytes(c, nil)
+		}
 		return d.string(c)
 	case msgpcode.Array16, msgpcode.Array32:
 		return d.decodeSlice(c)

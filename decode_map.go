@@ -316,7 +316,7 @@ func decodeStructValue(d *Decoder, v reflect.Value) error {
 	}
 
 	for _, f := range fields.List {
-		if err := f.DecodeValue(d, v); err != nil {
+		if err := d.decodeStructField(f, v); err != nil {
 			return err
 		}
 	}
@@ -338,7 +338,7 @@ func (d *Decoder) decodeStruct(v reflect.Value, n int) error {
 		}
 
 		if f := fields.Map[name]; f != nil {
-			if err := f.DecodeValue(d, v); err != nil {
+			if err := d.decodeStructField(f, v); err != nil {
 				return err
 			}
 			continue

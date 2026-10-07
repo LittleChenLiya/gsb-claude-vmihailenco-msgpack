@@ -132,6 +132,9 @@ func (d *Decoder) decodeInternedString(intern bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := d.checkStrictStringCode(c); err != nil {
+		return "", err
+	}
 
 	if msgpcode.IsFixedString(c) {
 		n := int(c & msgpcode.FixedStrMask)

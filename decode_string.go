@@ -40,6 +40,9 @@ func (d *Decoder) DecodeString() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := d.checkStrictStringCode(c); err != nil {
+		return "", err
+	}
 	return d.string(c)
 }
 
@@ -79,6 +82,9 @@ func (d *Decoder) DecodeBytesLen() (int, error) {
 func (d *Decoder) DecodeBytes() ([]byte, error) {
 	c, err := d.readCode()
 	if err != nil {
+		return nil, err
+	}
+	if err := d.checkStrictBytesCode(c); err != nil {
 		return nil, err
 	}
 	return d.bytes(c, nil)
@@ -126,6 +132,9 @@ func (d *Decoder) decodeBytesPtr(ptr *[]byte) error {
 	if err != nil {
 		return err
 	}
+	if err := d.checkStrictBytesCode(c); err != nil {
+		return err
+	}
 	return d.bytesPtr(c, ptr)
 }
 
@@ -159,6 +168,9 @@ func decodeBytesValue(d *Decoder, v reflect.Value) error {
 	if err != nil {
 		return err
 	}
+	if err := d.checkStrictBytesCode(c); err != nil {
+		return err
+	}
 
 	b, err := d.bytes(c, v.Bytes())
 	if err != nil {
@@ -173,6 +185,9 @@ func decodeBytesValue(d *Decoder, v reflect.Value) error {
 func decodeByteArrayValue(d *Decoder, v reflect.Value) error {
 	c, err := d.readCode()
 	if err != nil {
+		return err
+	}
+	if err := d.checkStrictBytesCode(c); err != nil {
 		return err
 	}
 
