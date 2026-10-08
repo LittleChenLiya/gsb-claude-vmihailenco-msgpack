@@ -171,3 +171,83 @@ func TestDecodeCustomPayload(t *testing.T) {
 		t.Fatalf("got %q, wanted %q", payload, wanted)
 	}
 }
+
+type rawExtLate struct {
+	payload []byte
+}
+
+func (e *rawExtLate) MarshalMsgpack() ([]byte, error) { return e.payload, nil }
+func (e *rawExtLate) UnmarshalMsgpack(b []byte) error {
+	e.payload = append([]byte(nil), b...)
+	return nil
+}
+
+func TestRawExtForUnknownExt(t *testing.T) {
+	const unknownExtID = 42
+
+	knownPayload, err := (&ExtTest{"world"}).MarshalMsgpack()
+	require.NoError(t, err)
+	unknownPayload := []byte{0xde, 0xad, 0xbe, 0xef}
+
+	// Encode: known ext (id=9, registered), unknown ext (id=42), plain value.
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	require.NoError(t, enc.EncodeExtHeader(9, len(knownPayload)))
+	_, err = buf.Write(knownPayload)
+	require.NoError(t, err)
+	require.NoError(t, enc.EncodeExtHeader(unknownExtID, len(unknownPayload)))
+	_, err = buf.Write(unknownPayload)
+	require.NoError(t, err)
+	require.NoError(t, enc.Encode("tail"))
+
+	// Default behavior is unchanged: unknown ext id is an error.
+	var dst interface{}
+	err = msgpack.Unmarshal(buf.Bytes(), &dst)
+	require.NoError(t, err) // first value is the registered ext
+	decode := func(dec *msgpack.Decoder) interface{} {
+		var v interface{}
+		require.NoError(t, dec.Decode(&v))
+		return v
+	}
+	dec := msgpack.NewDecoder(bytes.NewReader(buf.Bytes()))
+	_ = decode(dec) // known ext
+	var v interface{}
+	err = dec.Decode(&v)
+	require.EqualError(t, err, "msgpack: unknown ext id=42")
+
+	// With the option enabled the unknown ext is returned as-is.
+	dec = msgpack.NewDecoder(bytes.NewReader(buf.Bytes()))
+	dec.UseRawExtForUnknownExt(true)
+
+	// Registered extensions still take priority and use their decoder.
+	require.Equal(t, &ExtTest{S: "hello world"}, decode(dec))
+
+	// Unknown ext: type code and payload copy are preserved.
+	raw, ok := decode(dec).(*msgpack.RawExt)
+	require.True(t, ok)
+	require.Equal(t, int8(unknownExtID), raw.Type)
+	require.Equal(t, unknownPayload, raw.Data)
+
+	// Read position is intact: the following plain value decodes normally.
+	require.Equal(t, "tail", decode(dec))
+
+	// Payload ownership: decoding more values must not clobber the copy.
+	dec = msgpack.NewDecoder(bytes.NewReader(buf.Bytes()))
+	dec.UseRawExtForUnknownExt(true)
+	_ = decode(dec) // known ext
+	raw = decode(dec).(*msgpack.RawExt)
+	require.Equal(t, "tail", decode(dec)) // reuses the decoder buffer
+	require.Equal(t, unknownPayload, raw.Data)
+
+	// Later registration changes do not affect already returned values,
+	// but take priority for new decodes.
+	msgpack.RegisterExt(unknownExtID, (*rawExtLate)(nil))
+	defer msgpack.UnregisterExt(unknownExtID)
+	require.Equal(t, int8(unknownExtID), raw.Type)
+	require.Equal(t, unknownPayload, raw.Data)
+
+	dec = msgpack.NewDecoder(bytes.NewReader(buf.Bytes()))
+	dec.UseRawExtForUnknownExt(true)
+	_ = decode(dec) // known ext
+	require.Equal(t, &rawExtLate{payload: unknownPayload}, decode(dec))
+}

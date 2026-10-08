@@ -13,6 +13,16 @@ type extInfo struct {
 	Decoder func(d *Decoder, v reflect.Value, extLen int) error
 }
 
+// RawExt holds a MessagePack extension value as-is: the extension type code
+// and a copy of the payload. It is returned by the decoder for extension
+// types without a registered decoder when Decoder.UseRawExtForUnknownExt is
+// enabled. The payload is owned by the RawExt value and is not affected by
+// later decoding or registration changes.
+type RawExt struct {
+	Type int8
+	Data []byte
+}
+
 var extTypes = make(map[int8]*extInfo)
 
 type MarshalerUnmarshaler interface {
@@ -251,6 +261,9 @@ func (d *Decoder) decodeInterfaceExt(c byte) (interface{}, error) {
 
 	info, ok := extTypes[extID]
 	if !ok {
+		if d.flags&unknownExtAsRawFlag != 0 {
+			return d.decodeRawExt(extID, extLen)
+		}
 		return nil, fmt.Errorf("msgpack: unknown ext id=%d", extID)
 	}
 
@@ -264,6 +277,18 @@ func (d *Decoder) decodeInterfaceExt(c byte) (interface{}, error) {
 	}
 
 	return v.Interface(), nil
+}
+
+// decodeRawExt reads extLen payload bytes and returns them as a *RawExt,
+// copying the payload so the returned value owns its data.
+func (d *Decoder) decodeRawExt(extID int8, extLen int) (interface{}, error) {
+	data, err := d.readN(extLen)
+	if err != nil {
+		return nil, err
+	}
+	payload := make([]byte, len(data))
+	copy(payload, data)
+	return &RawExt{Type: extID, Data: payload}, nil
 }
 
 func (d *Decoder) skipExt(c byte) error {

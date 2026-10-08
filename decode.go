@@ -24,6 +24,7 @@ const (
 	disallowUnknownFieldsFlag
 	usePreallocateValues
 	disableAllocLimitFlag
+	unknownExtAsRawFlag
 )
 
 type bufReader interface {
@@ -181,6 +182,20 @@ func (d *Decoder) DisableAllocLimit(on bool) {
 		d.flags |= disableAllocLimitFlag
 	} else {
 		d.flags &= ^disableAllocLimitFlag
+	}
+}
+
+// UseRawExtForUnknownExt causes the decoder to return a *RawExt (keeping the
+// ext type code and a copy of the payload) instead of an error when decoding
+// an extension type that has no registered decoder into an interface.
+// Extensions with a registered decoder still take priority and are decoded
+// as before. The option is disabled by default, preserving the original
+// "unknown ext id" error.
+func (d *Decoder) UseRawExtForUnknownExt(on bool) {
+	if on {
+		d.flags |= unknownExtAsRawFlag
+	} else {
+		d.flags &= ^unknownExtAsRawFlag
 	}
 }
 
