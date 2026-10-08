@@ -20,6 +20,29 @@ type MarshalerUnmarshaler interface {
 	Unmarshaler
 }
 
+// UnknownExt is the raw representation of an extension whose type id has no
+// registered decoder. It is returned from DecodeInterface / DecodeInterfaceLoose
+// only when the Decoder is configured with UseUnknownExtPassthrough(true).
+//
+// Payload is an independent copy of the extension body: it stays valid after
+// the Decoder is reused and later registrations (RegisterExtDecoder,
+// UnregisterExt) never change a value that has already been returned.
+type UnknownExt struct {
+	Type    int8
+	Payload []byte
+}
+
+var _ CustomEncoder = (*UnknownExt)(nil)
+
+// EncodeMsgpack writes the extension back using its original type id and
+// payload, so an UnknownExt decoded with passthrough enabled round-trips.
+func (ext UnknownExt) EncodeMsgpack(e *Encoder) error {
+	if err := e.EncodeExtHeader(ext.Type, len(ext.Payload)); err != nil {
+		return err
+	}
+	return e.write(ext.Payload)
+}
+
 func RegisterExt(extID int8, value MarshalerUnmarshaler) {
 	RegisterExtEncoder(extID, value, func(e *Encoder, v reflect.Value) ([]byte, error) {
 		marshaler := v.Interface().(Marshaler)
@@ -251,7 +274,22 @@ func (d *Decoder) decodeInterfaceExt(c byte) (interface{}, error) {
 
 	info, ok := extTypes[extID]
 	if !ok {
-		return nil, fmt.Errorf("msgpack: unknown ext id=%d", extID)
+		// A registered decoder always takes precedence; the passthrough
+		// strategy is used only for genuinely unknown extension types.
+		if d.flags&unknownExtPassthroughFlag == 0 {
+			return nil, fmt.Errorf("msgpack: unknown ext id=%d", extID)
+		}
+
+		b, err := d.readN(extLen)
+		if err != nil {
+			return nil, err
+		}
+		// Copy the payload: the slice returned by readN aliases the Decoder's
+		// scratch buffer and is overwritten by subsequent reads.
+		payload := make([]byte, extLen)
+		copy(payload, b)
+
+		return UnknownExt{Type: extID, Payload: payload}, nil
 	}
 
 	v := d.newValue(info.Type).Elem()

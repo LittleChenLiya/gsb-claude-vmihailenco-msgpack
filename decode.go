@@ -24,6 +24,7 @@ const (
 	disallowUnknownFieldsFlag
 	usePreallocateValues
 	disableAllocLimitFlag
+	unknownExtPassthroughFlag
 )
 
 type bufReader interface {
@@ -181,6 +182,23 @@ func (d *Decoder) DisableAllocLimit(on bool) {
 		d.flags |= disableAllocLimitFlag
 	} else {
 		d.flags &= ^disableAllocLimitFlag
+	}
+}
+
+// UseUnknownExtPassthrough causes the decoder to return unknown extension
+// values (extensions whose type id has no registered decoder) as an UnknownExt
+// containing the original extension type id and an independent copy of the
+// payload, instead of returning an "unknown ext" error.
+//
+// Extensions with a registered decoder are unaffected and keep using it.
+// By default (option disabled) decoding an unknown extension still returns an
+// error, so existing callers using DecodeInterface / DecodeInterfaceLoose
+// continue to behave exactly as before.
+func (d *Decoder) UseUnknownExtPassthrough(on bool) {
+	if on {
+		d.flags |= unknownExtPassthroughFlag
+	} else {
+		d.flags &= ^unknownExtPassthroughFlag
 	}
 }
 
